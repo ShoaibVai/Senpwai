@@ -12,6 +12,7 @@ from typing import Callable, Iterator, TypeVar, cast
 from webbrowser import open_new_tab
 
 import requests
+import cloudscraper
 
 from senpwai.common.static import OS, log_exception, try_deleting
 
@@ -128,6 +129,7 @@ def has_valid_internet_connection() -> bool:
 class Client:
     def __init__(self) -> None:
         self.headers = self.setup_request_headers()
+        self.scraper = cloudscraper.create_scraper()
 
     def setup_request_headers(self) -> dict[str, str]:
         headers = {"User-Agent": random.choice(USER_AGENTS)}
@@ -155,7 +157,7 @@ class Client:
         if method == "GET":
 
             def callback():
-                return requests.get(
+                return self.scraper.get(
                     url,
                     headers=headers,
                     stream=stream,
@@ -166,7 +168,7 @@ class Client:
         else:
 
             def callback():
-                return requests.post(
+                return self.scraper.post(
                     url,
                     headers=headers,
                     cookies=cookies,

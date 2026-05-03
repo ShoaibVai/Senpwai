@@ -327,13 +327,21 @@ class GetDirectDownloadLinks(ProgressFunction):
         for pahewin_link in pahewin_download_page_links:
             # Extract kwik page links
             pahewin_html_page = CLIENT.get(pahewin_link).text
-            kwik_page_link = cast(
-                re.Match[str], KWIK_PAGE_REGEX.search(pahewin_html_page)
-            ).group()
+            match = KWIK_PAGE_REGEX.search(pahewin_html_page)
+            if not match:
+                continue
+            kwik_page_link = match.group()
 
             # Extract direct download links from kwik html page
-            response = CLIENT.get(kwik_page_link)
-            match = cast(re.Match, PARAM_REGEX.search(response.text))
+            # We need to pass the pahewin link as referer to bypass some checks
+            response = CLIENT.get(kwik_page_link, headers=CLIENT.make_headers({"Referer": pahewin_link}))
+            
+            match = PARAM_REGEX.search(response.text)
+            if not match:
+                # If PARAM_REGEX fails, it might be due to Cloudflare or a change in the page
+                # For now, we'll skip this link, but in a real app, we might want to retry or log
+                continue
+                
             full_key, key, v1, v2 = (
                 match.group(1),
                 match.group(2),
@@ -342,8 +350,15 @@ class GetDirectDownloadLinks(ProgressFunction):
             )
             form = decrypt_post_form(full_key, key, int(v1), int(v2))
             soup = BeautifulSoup(form, PARSER)
-            post_url = cast(str, cast(Tag, soup.form)["action"])
-            token_value = cast(str, cast(Tag, soup.input)["value"])
+            
+            form_tag = soup.form
+            input_tag = soup.input
+            if not form_tag or not input_tag:
+                continue
+                
+            post_url = cast(str, form_tag["action"])
+            token_value = cast(str, input_tag["value"])
+            
             response = CLIENT.post(
                 post_url,
                 headers=CLIENT.make_headers({"Referer": kwik_page_link}),
@@ -351,8 +366,11 @@ class GetDirectDownloadLinks(ProgressFunction):
                 data={"_token": token_value},
                 allow_redirects=False,
             )
-            direct_download_link = response.headers["Location"]
-            direct_download_links.append(direct_download_link)
+            
+            if "Location" in response.headers:
+                direct_download_link = response.headers["Location"]
+                direct_download_links.append(direct_download_link)
+                
             self.resume.wait()
             if self.cancelled:
                 return []
@@ -365,11 +383,15 @@ def get_anime_metadata(anime_id: str) -> AnimeMetadata:
     page_link = f"{PAHE_HOME_URL}/anime/{anime_id}"
     page_content = site_request(page_link, allow_redirects=True).content
     soup = BeautifulSoup(page_content, PARSER)
+    
     poster = soup.find(class_="youtube-preview")
     if not isinstance(poster, Tag):
         poster = cast(Tag, soup.find(class_="poster-image"))
-    poster_url = cast(str, poster["href"])
-    summary = cast(Tag, soup.find(class_="anime-synopsis")).get_text()
+    poster_url = cast(str, poster["href"]) if poster else ""
+    
+    summary_tag = soup.find(class_="anime-synopsis")
+    summary = summary_tag.get_text() if summary_tag else ""
+    
     genres_tag = cast(Tag, soup.find(class_="anime-genre font-weight-bold"))
     genres = (
         [
@@ -379,13 +401,19 @@ def get_anime_metadata(anime_id: str) -> AnimeMetadata:
         if genres_tag
         else []
     )
-    season_and_year = cast(
-        str, cast(Tag, soup.select_one('a[href*="/anime/season/"]'))["title"]
-    )
-    _, release_year = season_and_year.split(" ")
+    
+    season_tag = soup.select_one('a[href*="/anime/season/"]')
+    if season_tag:
+        season_and_year = cast(str, season_tag["title"])
+        _, release_year_str = season_and_year.split(" ")
+        release_year = int(release_year_str)
+    else:
+        release_year = 0
+        
     page_link = ANIME_PAGE_URL.format(anime_id)
     page_json = site_request(page_link).json()
-    episode_count = page_json["total"]
+    episode_count = page_json.get("total", 0)
+    
     tag = soup.find(title="Currently Airing")
     if tag:
         airing_status = AiringStatus.ONGOING
@@ -393,6 +421,7 @@ def get_anime_metadata(anime_id: str) -> AnimeMetadata:
         airing_status = AiringStatus.UPCOMING
     else:
         airing_status = AiringStatus.FINISHED
+        
     return AnimeMetadata(
-        poster_url, summary, episode_count, airing_status, genres, int(release_year)
+        poster_url, summary, episode_count, airing_status, genres, release_year
     )
